@@ -1,6 +1,6 @@
 import re
 
-def nmea_to_coords(nmea_sentence, default_alt=10):
+def nmea_to_coords(nmea_sentence, default_alt=3):
     """
     Convert NMEA sentence to [lat, lon, alt].
     Supports GPGGA and GPRMC sentences.
