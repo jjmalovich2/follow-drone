@@ -1,29 +1,28 @@
 import serial
 import time
 from socket import socket, AF_INET, SOCK_STREAM
+from decoder import nmea_to_coords  # Import your decoder function
 
-# GPS Setup (adjust port/baudrate)
-GPS_PORT = "/dev/ttyS0"  # Common ports: /dev/ttyAMA0, /dev/ttyUSB0
+# Configuration
+GPS_PORT = "/dev/ttyS0"
 GPS_BAUDRATE = 9600
-
-# Receiver Pi's IP and port
-RECEIVER_IP = "192.168.1.100"  # Replace with receiver's IP
-RECEIVER_PORT = 1234
+RECEIVER_IP = "172.16.18.74"
+RECEIVER_PORT = 8080
 
 def get_gps_data():
-    """Read NMEA data from GPS module"""
+    """Read raw NMEA data from GPS module"""
     try:
         ser = serial.Serial(GPS_PORT, GPS_BAUDRATE, timeout=1)
         while True:
-            line = ser.readline().decode('ascii', errors='replace').strip()
-            if line.startswith('$GPGGA'):  # Example: GPGGA sentence has lat/lon
+            line = ser.readline().decode('ascii', errors='ignore').strip()
+            if line.startswith(('$GPGGA', '$GPRMC')):
                 return line
-    except serial.SerialException as e:
+    except Exception as e:
         print(f"GPS Error: {e}")
         return None
 
-def send_to_receiver(data):
-    """Send data over TCP"""
+def send_data(data):
+    """Send coordinates to receiver"""
     try:
         with socket(AF_INET, SOCK_STREAM) as s:
             s.connect((RECEIVER_IP, RECEIVER_PORT))
@@ -34,7 +33,10 @@ def send_to_receiver(data):
 
 if __name__ == "__main__":
     while True:
-        gps_data = get_gps_data()
-        if gps_data:
-            send_to_receiver(gps_data)
-        time.sleep(1)  # Adjust based on GPS update rate
+        raw_data = get_gps_data()
+        if raw_data:
+            # Decode and send coordinates
+            coords = nmea_to_coords(raw_data)
+            if coords:
+                send_data(str(coords))  # Send as string "[lat,lon,alt]"
+        time.sleep(1)
