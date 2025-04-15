@@ -3,8 +3,8 @@ import time
 from socket import socket, AF_INET, SOCK_STREAM
 from datetime import datetime
 
-RECEIVER_IP = "192.168.241.1"
-RECEIVER_PORT = 40739
+RECEIVER_IP = "192.168.241.1" #test ip
+RECEIVER_PORT = 40739         #test port
 
 
 def generate_fake_coords():
