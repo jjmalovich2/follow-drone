@@ -64,6 +64,8 @@ def start_receiver():
                         lon = coords[1]
 
                         display(coords, lat, lon, latency, oldlat, oldlon, addr)
+                        oldlat = lat
+                        oldlan = lan
 
                 except (SyntaxError, ValueError, IndexError):
                     print(f"Invalid data: {data}")
