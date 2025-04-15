@@ -6,7 +6,7 @@ from decoder import nmea_to_coords  # Import your decoder function
 # Configuration
 GPS_PORT = "/dev/ttyS0"
 GPS_BAUDRATE = 9600
-RECEIVER_IP = "172.16.18.74"
+RECEIVER_IP = "172.16.18.74" #rpi ip address
 RECEIVER_PORT = 8080
 
 def get_gps_data():
