@@ -11,9 +11,11 @@
 #include <iomanip>
 #include <arpa/inet.h>
 #include <endian.h>
+#include <string>
 
 // Constants
 const int PORT = 40739;
+const std::string IP = "172.16.18.74";
 const int MSG_SIZE = 24;  // 4+4+4+8 bytes (3 floats + 1 double)
 const int DELAY_WINDOW = 5;
 
@@ -140,7 +142,9 @@ void start_receiver() {
         exit(EXIT_FAILURE);
     }
     
-    std::cout << "Receiver started. Waiting for connections...\n";
+    std::cout << "Receiver started. Waiting for connections...\n"
+              << "Port: " << PORT
+              << "IP:   " << IP;
     
     // Accept connection
     if ((new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addrlen)) < 0) {
