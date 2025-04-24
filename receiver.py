@@ -1,4 +1,4 @@
-from socket import socket, AF_INET, SOCK_STREAM
+from socket import socket, AF_INET, SOCK_STREAM, SOL_SOCKET, SO_REUSEADDR
 from datetime import datetime
 import struct
 import os
@@ -23,8 +23,8 @@ MIN_LAT = -90
 MAX_LAT = 90
 MIN_LON = -180
 MAX_LON = 180
-MIN_ALT = -1000
-MAX_ALT = 10000
+MIN_ALT = -1000  # Dead Sea is about -430m
+MAX_ALT = 10000  # Mount Everest is 8848m
 
 class GPSData:
     def __init__(self, lat, lon, alt, timestamp):
@@ -237,12 +237,14 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
             self.send_error(500, "Internal Server Error")
 
     def handle_main_page(self):
-        with receiver.lock:
-            path_count = len(receiver.gps_path)
-            last_update = datetime.fromtimestamp(receiver.last_update).strftime('%H:%M:%S')
-            has_plot = receiver.plot_img is not None
-        
-        html = f"""<!DOCTYPE html>
+        """Handle requests for the main HTML page"""
+        try:
+            with receiver.lock:
+                path_count = len(receiver.gps_path)
+                last_update = datetime.fromtimestamp(receiver.last_update).strftime('%H:%M:%S')
+                plot_img = receiver.plot_img
+                
+            html = f"""<!DOCTYPE html>
 <html>
 <head>
     <title>GPS Tracker</title>
@@ -267,7 +269,7 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
         </div>
         
         <div class="plot-container">
-            {f'<img src="/plot" alt="GPS Path">' if has_plot else '<p>Collecting data... (need at least 1 point)</p>'}
+            {f'<img src="/plot" alt="GPS Path">' if plot_img else '<p>Collecting data... (need at least 1 point)</p>'}
         </div>
         
         {self.generate_points_table()}
@@ -275,48 +277,62 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
 </body>
 </html>"""
 
-        self.send_response(200)
-        self.send_header('Content-type', 'text/html; charset=utf-8')
-        self.send_header('Content-Length', str(len(html)))
-        self.end_headers()
-        self.wfile.write(html.encode('utf-8'))
+            self.send_response(200)
+            self.send_header('Content-type', 'text/html; charset=utf-8')
+            self.send_header('Content-Length', str(len(html)))
+            self.end_headers()
+            self.wfile.write(html.encode('utf-8'))
+        except Exception as e:
+            print(f"Error generating page: {e}")
+            self.send_error(500, "Page generation failed")
 
     def generate_points_table(self):
-        with receiver.lock:
-            if not receiver.gps_path:
-                return ""
-            
-            points = receiver.gps_path[-10:][::-1]  # Last 10 points, newest first
-            rows = "".join(
-                f"<tr><td>{datetime.fromtimestamp(p.timestamp).strftime('%H:%M:%S')}</td>"
-                f"<td>{p.lat:.6f}</td>"
-                f"<td>{p.lon:.6f}</td>"
-                f"<td>{p.alt:.1f}m</td></tr>"
-                for p in points
-            )
-            
-            return f"""
-            <table>
-                <tr><th>Time</th><th>Latitude</th><th>Longitude</th><th>Altitude</th></tr>
-                {rows}
-            </table>"""
+        """Generate HTML table of recent points"""
+        try:
+            with receiver.lock:
+                if not receiver.gps_path:
+                    return ""
+                
+                points = receiver.gps_path[-10:][::-1]  # Last 10 points, newest first
+                rows = "".join(
+                    f"<tr><td>{datetime.fromtimestamp(p.timestamp).strftime('%H:%M:%S')}</td>"
+                    f"<td>{p.lat:.6f}</td>"
+                    f"<td>{p.lon:.6f}</td>"
+                    f"<td>{p.alt:.1f}m</td></tr>"
+                    for p in points
+                )
+                
+                return f"""
+                <table>
+                    <tr><th>Time</th><th>Latitude</th><th>Longitude</th><th>Altitude</th></tr>
+                    {rows}
+                </table>"""
+        except Exception as e:
+            print(f"Error generating points table: {e}")
+            return ""
 
     def handle_plot_image(self):
-        with receiver.lock:
-            if not receiver.plot_img:
-                self.send_error(404, "No plot available")
-                return
-            
-            img_data = base64.b64decode(receiver.plot_img)
-            self.send_response(200)
-            self.send_header('Content-type', 'image/png')
-            self.send_header('Content-Length', str(len(img_data)))
-            self.end_headers()
-            self.wfile.write(img_data)
+        """Handle requests for the plot image"""
+        try:
+            with receiver.lock:
+                if not receiver.plot_img:
+                    self.send_error(404, "No plot available")
+                    return
+                
+                img_data = base64.b64decode(receiver.plot_img)
+                self.send_response(200)
+                self.send_header('Content-type', 'image/png')
+                self.send_header('Content-Length', str(len(img_data)))
+                self.end_headers()
+                self.wfile.write(img_data)
+        except Exception as e:
+            print(f"Error serving plot: {e}")
+            self.send_error(500, "Plot generation failed")
 
     def handle_kml_download(self):
-        receiver.save_kml()
+        """Handle requests for KML file download"""
         try:
+            receiver.save_kml()
             with open(KML_FILE, 'rb') as f:
                 kml_data = f.read()
                 self.send_response(200)
@@ -327,8 +343,12 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
                 self.wfile.write(kml_data)
         except FileNotFoundError:
             self.send_error(404, "KML file not found")
+        except Exception as e:
+            print(f"Error serving KML: {e}")
+            self.send_error(500, "KML generation failed")
 
     def handle_favicon(self):
+        """Handle favicon requests to prevent 404 errors"""
         self.send_response(404)
         self.end_headers()
 
@@ -357,7 +377,8 @@ def start_receiver():
     http_thread.start()
     
     with socket(AF_INET, SOCK_STREAM) as s:
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # Set socket options before binding
+        s.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
         s.bind(('0.0.0.0', 40739))
         s.listen(1)
         print("GPS receiver waiting for connection...")
