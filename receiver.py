@@ -7,6 +7,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import threading
 import webbrowser
 from urllib.parse import urlencode
+import time
 
 # Constants
 MSG_FORMAT = "!fffd"  # lat(float), lon(float), alt(float), timestamp(double)
@@ -31,6 +32,7 @@ class GPSReceiver:
         self.oldlat = '~'
         self.oldlon = '~'
         self.client_addr = None
+        self.last_update = time.time()
 
     def calculate_latency(self, sent_ts):
         """Compute latency in milliseconds"""
@@ -78,6 +80,7 @@ class GPSReceiver:
             -------------------------------------
             | Web Interface: http://localhost:{HTTP_PORT}
             | Path Points: {len(self.gps_path)}
+            | Last Update: {datetime.fromtimestamp(self.last_update).strftime('%H:%M:%S')}
             -------------------------------------
         """)
 
@@ -109,31 +112,39 @@ class GPSReceiver:
             return ""
         
         with self.lock:
+            # Create a path for Google Maps
+            path_coords = "|".join([f"{p.lat},{p.lon}" for p in self.gps_path])
+            
+            # Google Maps URL with path
             params = {
-                'api': '1',
-                'travelmode': 'walking',
-                'dir_action': 'navigate',
-                'origin': f"{self.gps_path[0].lat},{self.gps_path[0].lon}",
-                'destination': f"{self.gps_path[-1].lat},{self.gps_path[-1].lon}",
-                'waypoints': '|'.join(f"{p.lat},{p.lon}" for p in self.gps_path[1:-1])
+                'q': path_coords,
+                'output': 'embed',
+                'z': '15'  # Zoom level
             }
-            return f"https://www.google.com/maps/dir/?{urlencode(params)}"
+            return f"https://www.google.com/maps?{urlencode(params)}"
 
     def generate_static_map_url(self):
         if not self.gps_path:
             return ""
         
         with self.lock:
-            path = '|'.join(f"{p.lat},{p.lon}" for p in self.gps_path)
+            # Create path for static map
+            path_coords = "|".join([f"{p.lat},{p.lon}" for p in self.gps_path])
+            
+            # Create markers for start and end
             markers = []
             if len(self.gps_path) > 1:
-                markers.append(f"color:green|label:S|{self.gps_path[0].lat},{self.gps_path[0].lon}")
-                markers.append(f"color:red|label:E|{self.gps_path[-1].lat},{self.gps_path[-1].lon}")
+                start = self.gps_path[0]
+                end = self.gps_path[-1]
+                markers.append(f"color:green|label:S|{start.lat},{start.lon}")
+                markers.append(f"color:red|label:E|{end.lat},{end.lon}")
             
+            # Static Maps URL parameters
             params = {
                 'size': '800x400',
-                'path': f'color:0xff0000ff|weight:5|{path}',
-                'markers': '&markers='.join(markers) if markers else ''
+                'maptype': 'roadmap',
+                'path': f'color:0x0000ff|weight:5|{path_coords}',
+                'markers': '&markers='.join(markers)
             }
             return f"https://maps.googleapis.com/maps/api/staticmap?{urlencode(params)}"
 
@@ -144,35 +155,54 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.send_header('Content-type', 'text/html')
             self.end_headers()
             
+            # Generate URLs with current data
             maps_url = receiver.generate_google_maps_url()
             static_url = receiver.generate_static_map_url()
             
+            # Get current path length
+            with receiver.lock:
+                path_count = len(receiver.gps_path)
+                last_update = datetime.fromtimestamp(receiver.last_update).strftime('%H:%M:%S')
+            
+            # Auto-refresh every 5 seconds
             html = f"""
             <html>
                 <head>
                     <title>GPS Path Viewer</title>
+                    <meta http-equiv="refresh" content="5">
                     <style>
                         body {{ font-family: Arial, sans-serif; margin: 20px; }}
-                        .map {{ margin: 20px 0; }}
+                        .map-container {{ margin: 20px 0; }}
                         a {{ color: #1a73e8; text-decoration: none; }}
                         a:hover {{ text-decoration: underline; }}
+                        .info {{ background: #f5f5f5; padding: 10px; border-radius: 5px; }}
                     </style>
                 </head>
                 <body>
                     <h1>GPS Path Viewer</h1>
-                    <p>Total points: {len(receiver.gps_path)}</p>
+                    <div class="info">
+                        <p>Total points: {path_count}</p>
+                        <p>Last update: {last_update}</p>
+                    </div>
                     
-                    <div class="map">
+                    <div class="map-container">
                         <h2>Interactive Map</h2>
-                        <a href="{maps_url}" target="_blank">Open in Google Maps</a>
+                        <iframe
+                            width="100%"
+                            height="450"
+                            frameborder="0" style="border:0"
+                            src="{maps_url}"
+                            allowfullscreen>
+                        </iframe>
+                        <p><a href="{maps_url}" target="_blank">Open in full window</a></p>
                     </div>
                     
-                    <div class="map">
+                    <div class="map-container">
                         <h2>Static Map</h2>
-                        <img src="{static_url}" alt="GPS Path">
+                        <img src="{static_url}" alt="GPS Path" style="max-width: 100%;">
                     </div>
                     
-                    <div class="map">
+                    <div class="map-container">
                         <h2>Download</h2>
                         <a href="/kml" download>Download KML file</a>
                     </div>
@@ -245,7 +275,8 @@ def start_receiver():
                             with receiver.lock:
                                 data = GPSData(lat, lon, alt, ts)
                                 receiver.gps_path.append(data)
-                                if len(receiver.gps_path) % 100 == 0:
+                                receiver.last_update = time.time()
+                                if len(receiver.gps_path) % 10 == 0:  # Save more frequently
                                     receiver.save_kml()
                             
                             # Update display
