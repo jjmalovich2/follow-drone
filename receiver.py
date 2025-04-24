@@ -6,8 +6,10 @@ from statistics import mean
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import threading
 import webbrowser
-from urllib.parse import urlencode
 import time
+import matplotlib.pyplot as plt
+from io import BytesIO
+import base64
 
 # Constants
 MSG_FORMAT = "!fffd"  # lat(float), lon(float), alt(float), timestamp(double)
@@ -51,30 +53,17 @@ class GPSReceiver:
     def display(self, data, current_delay, avg_delay):
         os.system('clear')
         print(f"""
-            $$$$$$$$\        $$\ $$\                               $$$$$$$\                                          
-            $$  _____|       $$ |$$ |                              $$  __$$\                                         
-            $$ |    $$$$$$\  $$ |$$ | $$$$$$\  $$\  $$\  $$\       $$ |  $$ | $$$$$$\   $$$$$$\  $$$$$$$\   $$$$$$\  
-            $$$$$\ $$  __$$\ $$ |$$ |$$  __$$\ $$ | $$ | $$ |      $$ |  $$ |$$  __$$\ $$  __$$\ $$  __$$\ $$  __$$\ 
-            $$  __|$$ /  $$ |$$ |$$ |$$ /  $$ |$$ | $$ | $$ |      $$ |  $$ |$$ |  \__|$$ /  $$ |$$ |  $$ |$$$$$$$$ |
-            $$ |   $$ |  $$ |$$ |$$ |$$ |  $$ |$$ | $$ | $$ |      $$ |  $$ |$$ |      $$ |  $$ |$$ |  $$ |$$   ____|
-            $$ |   \$$$$$$  |$$ |$$ |\$$$$$$  |\$$$$$\$$$$  |      $$$$$$$  |$$ |      \$$$$$$  |$$ |  $$ |\$$$$$$$\ 
-            \__|    \______/ \__|\__| \______/  \_____\____/       \_______/ \__|       \______/ \__|  \__| \_______|                                                                                                     
-
+            GPS TRACKING SYSTEM
             -------------------------------------
             | Connected To: {self.client_addr}                
             | Bytes Received: {self.total_bytes:,}    
             -------------------------------------
-
-            -------------------------------------                                              
-            | Data: {data}                      
-            | Drone Latitude: {self.oldlat}          
-            | Drone Longitude: {self.oldlon}         
-            | Drone Altitude: 3m                
+            | Current Position:               
+            | Latitude: {data.lat:.6f}        
+            | Longitude: {data.lon:.6f}       
+            | Altitude: {data.alt:.1f}m       
             -------------------------------------
-
-            -------------------------------------
-            | Person Latitude: {data.lat:.6f}        
-            | Person Longitude: {data.lon:.6f}       
+            | Performance:                     
             | Current Delay: {current_delay:.2f}ms
             | Avg Delay (Last 5): {avg_delay:.2f}ms
             -------------------------------------
@@ -84,143 +73,131 @@ class GPSReceiver:
             -------------------------------------
         """)
 
-    def save_kml(self):
+    def generate_plot_image(self):
+        """Generate base64 encoded plot of GPS path"""
         with self.lock:
-            if not self.gps_path:
-                return
-            
-            with open(KML_FILE, 'w') as f:
-                f.write('<?xml version="1.0" encoding="UTF-8"?>\n')
-                f.write('<kml xmlns="http://www.opengis.net/kml/2.2">\n')
-                f.write('<Document>\n')
-                f.write('<Placemark>\n')
-                f.write('<name>GPS Path</name>\n')
-                f.write('<LineString>\n')
-                f.write('<coordinates>\n')
-                
-                for point in self.gps_path:
-                    f.write(f"{point.lon},{point.lat},{point.alt}\n")
-                
-                f.write('</coordinates>\n')
-                f.write('</LineString>\n')
-                f.write('</Placemark>\n')
-                f.write('</Document>\n')
-                f.write('</kml>\n')
+            if len(self.gps_path) < 2:
+                return None
 
-    def generate_google_maps_url(self):
-        if not self.gps_path:
-            return ""
-        
-        with self.lock:
-            # Create a path for Google Maps
-            path_coords = "|".join([f"{p.lat},{p.lon}" for p in self.gps_path])
+            plt.figure(figsize=(10, 6))
             
-            # Google Maps URL with path
-            params = {
-                'q': path_coords,
-                'output': 'embed',
-                'z': '15'  # Zoom level
-            }
-            return f"https://www.google.com/maps?{urlencode(params)}"
-
-    def generate_static_map_url(self):
-        if not self.gps_path:
-            return ""
-        
-        with self.lock:
-            # Create path for static map
-            path_coords = "|".join([f"{p.lat},{p.lon}" for p in self.gps_path])
+            # Extract coordinates
+            lats = [p.lat for p in self.gps_path]
+            lons = [p.lon for p in self.gps_path]
             
-            # Create markers for start and end
-            markers = []
-            if len(self.gps_path) > 1:
-                start = self.gps_path[0]
-                end = self.gps_path[-1]
-                markers.append(f"color:green|label:S|{start.lat},{start.lon}")
-                markers.append(f"color:red|label:E|{end.lat},{end.lon}")
+            # Create plot
+            plt.plot(lons, lats, 'b-', linewidth=2, label='Path')
+            plt.plot(lons[0], lats[0], 'go', markersize=8, label='Start')
+            plt.plot(lons[-1], lats[-1], 'ro', markersize=8, label='End')
             
-            # Static Maps URL parameters
-            params = {
-                'size': '800x400',
-                'maptype': 'roadmap',
-                'path': f'color:0x0000ff|weight:5|{path_coords}',
-                'markers': '&markers='.join(markers)
-            }
-            return f"https://maps.googleapis.com/maps/api/staticmap?{urlencode(params)}"
+            # Add labels and title
+            plt.xlabel('Longitude')
+            plt.ylabel('Latitude')
+            plt.title(f'GPS Path Tracking ({len(self.gps_path)} points)')
+            plt.legend()
+            plt.grid(True)
+            
+            # Save to bytes buffer
+            buf = BytesIO()
+            plt.savefig(buf, format='png', bbox_inches='tight', dpi=100)
+            plt.close()
+            buf.seek(0)
+            return base64.b64encode(buf.read()).decode('utf-8')
 
 class RequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == '/':
-            self.send_response(200)
-            self.send_header('Content-type', 'text/html')
-            self.end_headers()
-            
-            # Generate URLs with current data
-            maps_url = receiver.generate_google_maps_url()
-            static_url = receiver.generate_static_map_url()
-            
-            # Get current path length
-            with receiver.lock:
-                path_count = len(receiver.gps_path)
-                last_update = datetime.fromtimestamp(receiver.last_update).strftime('%H:%M:%S')
-            
-            # Auto-refresh every 5 seconds
-            html = f"""
-            <html>
-                <head>
-                    <title>GPS Path Viewer</title>
-                    <meta http-equiv="refresh" content="5">
-                    <style>
-                        body {{ font-family: Arial, sans-serif; margin: 20px; }}
-                        .map-container {{ margin: 20px 0; }}
-                        a {{ color: #1a73e8; text-decoration: none; }}
-                        a:hover {{ text-decoration: underline; }}
-                        .info {{ background: #f5f5f5; padding: 10px; border-radius: 5px; }}
-                    </style>
-                </head>
-                <body>
-                    <h1>GPS Path Viewer</h1>
-                    <div class="info">
-                        <p>Total points: {path_count}</p>
-                        <p>Last update: {last_update}</p>
-                    </div>
-                    
-                    <div class="map-container">
-                        <h2>Interactive Map</h2>
-                        <iframe
-                            width="100%"
-                            height="450"
-                            frameborder="0" style="border:0"
-                            src="{maps_url}"
-                            allowfullscreen>
-                        </iframe>
-                        <p><a href="{maps_url}" target="_blank">Open in full window</a></p>
-                    </div>
-                    
-                    <div class="map-container">
-                        <h2>Static Map</h2>
-                        <img src="{static_url}" alt="GPS Path" style="max-width: 100%;">
-                    </div>
-                    
-                    <div class="map-container">
-                        <h2>Download</h2>
-                        <a href="/kml" download>Download KML file</a>
-                    </div>
-                </body>
-            </html>
-            """
-            self.wfile.write(html.encode())
+            self.handle_main_page()
         elif self.path == '/kml':
-            receiver.save_kml()
-            with open(KML_FILE, 'rb') as f:
-                self.send_response(200)
-                self.send_header('Content-type', 'application/vnd.google-earth.kml+xml')
-                self.send_header('Content-Disposition', f'attachment; filename={KML_FILE}')
-                self.end_headers()
-                self.wfile.write(f.read())
+            self.handle_kml_download()
         else:
             self.send_response(404)
             self.end_headers()
+
+    def handle_main_page(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/html')
+        self.end_headers()
+        
+        # Generate plot image
+        plot_img = receiver.generate_plot_image()
+        
+        # Get current stats
+        with receiver.lock:
+            path_count = len(receiver.gps_path)
+            last_update = datetime.fromtimestamp(receiver.last_update).strftime('%H:%M:%S')
+            last_point = receiver.gps_path[-1] if receiver.gps_path else None
+        
+        html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>GPS Path Viewer</title>
+            <meta http-equiv="refresh" content="5">
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 20px; }}
+                .container {{ max-width: 1000px; margin: 0 auto; }}
+                .panel {{ background: #f8f9fa; padding: 15px; border-radius: 5px; margin-bottom: 20px; }}
+                .map-container {{ margin: 20px 0; text-align: center; }}
+                img {{ max-width: 100%; height: auto; border: 1px solid #ddd; }}
+                .data-table {{ width: 100%; border-collapse: collapse; margin-top: 20px; }}
+                .data-table th, .data-table td {{ padding: 8px; text-align: left; border-bottom: 1px solid #ddd; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>GPS Path Tracking</h1>
+                
+                <div class="panel">
+                    <div style="display: flex; justify-content: space-between;">
+                        <div>Total points: <strong>{path_count}</strong></div>
+                        <div>Last update: <strong>{last_update}</strong></div>
+                    </div>
+                </div>
+                
+                <div class="map-container">
+                    {f'<img src="data:image/png;base64,{plot_img}" alt="GPS Path">' if plot_img else '<p>Not enough data points to generate path</p>'}
+                </div>
+                
+                {self.generate_point_table() if receiver.gps_path else ''}
+            </div>
+        </body>
+        </html>
+        """
+        self.wfile.write(html.encode())
+
+    def generate_point_table(self):
+        with receiver.lock:
+            points = receiver.gps_path[-10:][::-1]  # Last 10 points, newest first
+            
+        rows = "\n".join(
+            f"<tr><td>{datetime.fromtimestamp(p.timestamp).strftime('%H:%M:%S')}</td>"
+            f"<td>{p.lat:.6f}</td>"
+            f"<td>{p.lon:.6f}</td>"
+            f"<td>{p.alt:.1f}m</td></tr>"
+            for p in points
+        )
+        
+        return f"""
+        <table class="data-table">
+            <tr>
+                <th>Time</th>
+                <th>Latitude</th>
+                <th>Longitude</th>
+                <th>Altitude</th>
+            </tr>
+            {rows}
+        </table>
+        """
+
+    def handle_kml_download(self):
+        receiver.save_kml()
+        with open(KML_FILE, 'rb') as f:
+            self.send_response(200)
+            self.send_header('Content-type', 'application/vnd.google-earth.kml+xml')
+            self.send_header('Content-Disposition', f'attachment; filename={KML_FILE}')
+            self.end_headers()
+            self.wfile.write(f.read())
 
 def start_http_server():
     server = HTTPServer(('0.0.0.0', HTTP_PORT), RequestHandler)
@@ -276,13 +253,11 @@ def start_receiver():
                                 data = GPSData(lat, lon, alt, ts)
                                 receiver.gps_path.append(data)
                                 receiver.last_update = time.time()
-                                if len(receiver.gps_path) % 10 == 0:  # Save more frequently
-                                    receiver.save_kml()
+                                if len(receiver.gps_path) % 10 == 0:
+                                    receiver.generate_plot_image()  # Pre-generate plot
                             
                             # Update display
                             receiver.display(data, current_delay, avg_delay)
-                            receiver.oldlat = lat
-                            receiver.oldlon = lon
                             
                 except (ConnectionResetError, ValueError) as e:
                     print(f"Connection error: {e}")
