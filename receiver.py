@@ -3,108 +3,255 @@ from datetime import datetime
 import struct
 import os
 from statistics import mean
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import threading
+import webbrowser
+from urllib.parse import urlencode
 
 # Constants
 MSG_FORMAT = "!fffd"  # lat(float), lon(float), alt(float), timestamp(double)
 MSG_SIZE = struct.calcsize(MSG_FORMAT)  # 24 bytes
-DELAY_WINDOW = 5  # Only keep last 5 latency measurements
+DELAY_WINDOW = 5
+HTTP_PORT = 8080
+KML_FILE = "gps_path.kml"
 
-def calculate_latency(sent_ts):
-    """Compute latency in milliseconds"""
-    return round((datetime.now().timestamp() - sent_ts) * 1000, 2)
+class GPSData:
+    def __init__(self, lat, lon, alt, timestamp):
+        self.lat = lat
+        self.lon = lon
+        self.alt = alt
+        self.timestamp = timestamp
 
-def unpack_data(binary_data):
-    """Unpack binary data with validation"""
-    try:
-        if len(binary_data) != MSG_SIZE:
-            raise ValueError(f"Invalid size: expected {MSG_SIZE}, got {len(binary_data)}")
-        return struct.unpack(MSG_FORMAT, binary_data)
-    except struct.error as e:
-        print(f"Unpack error: {e}")
-        return None
+class GPSReceiver:
+    def __init__(self):
+        self.gps_path = []
+        self.lock = threading.Lock()
+        self.total_bytes = 0
+        self.delay_avg = []
+        self.oldlat = '~'
+        self.oldlon = '~'
+        self.client_addr = None
 
-def display(data, lat, lon, current_delay, avg_delay, oldlat, oldlon, id, byte_count):
-    os.system('clear')
-    print(f"""
-        $$$$$$$$\        $$\ $$\                               $$$$$$$\                                          
-        $$  _____|       $$ |$$ |                              $$  __$$\                                         
-        $$ |    $$$$$$\  $$ |$$ | $$$$$$\  $$\  $$\  $$\       $$ |  $$ | $$$$$$\   $$$$$$\  $$$$$$$\   $$$$$$\  
-        $$$$$\ $$  __$$\ $$ |$$ |$$  __$$\ $$ | $$ | $$ |      $$ |  $$ |$$  __$$\ $$  __$$\ $$  __$$\ $$  __$$\ 
-        $$  __|$$ /  $$ |$$ |$$ |$$ /  $$ |$$ | $$ | $$ |      $$ |  $$ |$$ |  \__|$$ /  $$ |$$ |  $$ |$$$$$$$$ |
-        $$ |   $$ |  $$ |$$ |$$ |$$ |  $$ |$$ | $$ | $$ |      $$ |  $$ |$$ |      $$ |  $$ |$$ |  $$ |$$   ____|
-        $$ |   \$$$$$$  |$$ |$$ |\$$$$$$  |\$$$$$\$$$$  |      $$$$$$$  |$$ |      \$$$$$$  |$$ |  $$ |\$$$$$$$\ 
-        \__|    \______/ \__|\__| \______/  \_____\____/       \_______/ \__|       \______/ \__|  \__| \_______|                                                                                                     
+    def calculate_latency(self, sent_ts):
+        """Compute latency in milliseconds"""
+        return round((datetime.now().timestamp() - sent_ts) * 1000, 2)
 
-        -------------------------------------
-        | Connected To: {id}                
-        | Bytes Received: {byte_count:,}    
-        -------------------------------------
+    def unpack_data(self, binary_data):
+        """Unpack binary data with validation"""
+        try:
+            if len(binary_data) != MSG_SIZE:
+                raise ValueError(f"Invalid size: expected {MSG_SIZE}, got {len(binary_data)}")
+            return struct.unpack(MSG_FORMAT, binary_data)
+        except struct.error as e:
+            print(f"Unpack error: {e}")
+            return None
 
-        -------------------------------------                                              
-        | Data: {data}                      
-        | Drone Latitude: {oldlat}          
-        | Drone Longitude: {oldlon}         
-        | Drone Altitude: 3m                
-        -------------------------------------
+    def display(self, data, current_delay, avg_delay):
+        os.system('clear')
+        print(f"""
+            $$$$$$$$\        $$\ $$\                               $$$$$$$\                                          
+            $$  _____|       $$ |$$ |                              $$  __$$\                                         
+            $$ |    $$$$$$\  $$ |$$ | $$$$$$\  $$\  $$\  $$\       $$ |  $$ | $$$$$$\   $$$$$$\  $$$$$$$\   $$$$$$\  
+            $$$$$\ $$  __$$\ $$ |$$ |$$  __$$\ $$ | $$ | $$ |      $$ |  $$ |$$  __$$\ $$  __$$\ $$  __$$\ $$  __$$\ 
+            $$  __|$$ /  $$ |$$ |$$ |$$ /  $$ |$$ | $$ | $$ |      $$ |  $$ |$$ |  \__|$$ /  $$ |$$ |  $$ |$$$$$$$$ |
+            $$ |   $$ |  $$ |$$ |$$ |$$ |  $$ |$$ | $$ | $$ |      $$ |  $$ |$$ |      $$ |  $$ |$$ |  $$ |$$   ____|
+            $$ |   \$$$$$$  |$$ |$$ |\$$$$$$  |\$$$$$\$$$$  |      $$$$$$$  |$$ |      \$$$$$$  |$$ |  $$ |\$$$$$$$\ 
+            \__|    \______/ \__|\__| \______/  \_____\____/       \_______/ \__|       \______/ \__|  \__| \_______|                                                                                                     
 
-        -------------------------------------
-        | Person Latitude: {lat:.6f}        
-        | Person Longitude: {lon:.6f}       
-        | Current Delay: {current_delay:.2f}ms
-        | Avg Delay (Last 5): {avg_delay:.2f}ms
-        -------------------------------------
-    """)
+            -------------------------------------
+            | Connected To: {self.client_addr}                
+            | Bytes Received: {self.total_bytes:,}    
+            -------------------------------------
+
+            -------------------------------------                                              
+            | Data: {data}                      
+            | Drone Latitude: {self.oldlat}          
+            | Drone Longitude: {self.oldlon}         
+            | Drone Altitude: 3m                
+            -------------------------------------
+
+            -------------------------------------
+            | Person Latitude: {data.lat:.6f}        
+            | Person Longitude: {data.lon:.6f}       
+            | Current Delay: {current_delay:.2f}ms
+            | Avg Delay (Last 5): {avg_delay:.2f}ms
+            -------------------------------------
+            | Web Interface: http://localhost:{HTTP_PORT}
+            | Path Points: {len(self.gps_path)}
+            -------------------------------------
+        """)
+
+    def save_kml(self):
+        with self.lock:
+            if not self.gps_path:
+                return
+            
+            with open(KML_FILE, 'w') as f:
+                f.write('<?xml version="1.0" encoding="UTF-8"?>\n')
+                f.write('<kml xmlns="http://www.opengis.net/kml/2.2">\n')
+                f.write('<Document>\n')
+                f.write('<Placemark>\n')
+                f.write('<name>GPS Path</name>\n')
+                f.write('<LineString>\n')
+                f.write('<coordinates>\n')
+                
+                for point in self.gps_path:
+                    f.write(f"{point.lon},{point.lat},{point.alt}\n")
+                
+                f.write('</coordinates>\n')
+                f.write('</LineString>\n')
+                f.write('</Placemark>\n')
+                f.write('</Document>\n')
+                f.write('</kml>\n')
+
+    def generate_google_maps_url(self):
+        if not self.gps_path:
+            return ""
+        
+        with self.lock:
+            params = {
+                'api': '1',
+                'travelmode': 'walking',
+                'dir_action': 'navigate',
+                'origin': f"{self.gps_path[0].lat},{self.gps_path[0].lon}",
+                'destination': f"{self.gps_path[-1].lat},{self.gps_path[-1].lon}",
+                'waypoints': '|'.join(f"{p.lat},{p.lon}" for p in self.gps_path[1:-1])
+            }
+            return f"https://www.google.com/maps/dir/?{urlencode(params)}"
+
+    def generate_static_map_url(self):
+        if not self.gps_path:
+            return ""
+        
+        with self.lock:
+            path = '|'.join(f"{p.lat},{p.lon}" for p in self.gps_path)
+            markers = []
+            if len(self.gps_path) > 1:
+                markers.append(f"color:green|label:S|{self.gps_path[0].lat},{self.gps_path[0].lon}")
+                markers.append(f"color:red|label:E|{self.gps_path[-1].lat},{self.gps_path[-1].lon}")
+            
+            params = {
+                'size': '800x400',
+                'path': f'color:0xff0000ff|weight:5|{path}',
+                'markers': '&markers='.join(markers) if markers else ''
+            }
+            return f"https://maps.googleapis.com/maps/api/staticmap?{urlencode(params)}"
+
+class RequestHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/':
+            self.send_response(200)
+            self.send_header('Content-type', 'text/html')
+            self.end_headers()
+            
+            maps_url = receiver.generate_google_maps_url()
+            static_url = receiver.generate_static_map_url()
+            
+            html = f"""
+            <html>
+                <head>
+                    <title>GPS Path Viewer</title>
+                    <style>
+                        body {{ font-family: Arial, sans-serif; margin: 20px; }}
+                        .map {{ margin: 20px 0; }}
+                        a {{ color: #1a73e8; text-decoration: none; }}
+                        a:hover {{ text-decoration: underline; }}
+                    </style>
+                </head>
+                <body>
+                    <h1>GPS Path Viewer</h1>
+                    <p>Total points: {len(receiver.gps_path)}</p>
+                    
+                    <div class="map">
+                        <h2>Interactive Map</h2>
+                        <a href="{maps_url}" target="_blank">Open in Google Maps</a>
+                    </div>
+                    
+                    <div class="map">
+                        <h2>Static Map</h2>
+                        <img src="{static_url}" alt="GPS Path">
+                    </div>
+                    
+                    <div class="map">
+                        <h2>Download</h2>
+                        <a href="/kml" download>Download KML file</a>
+                    </div>
+                </body>
+            </html>
+            """
+            self.wfile.write(html.encode())
+        elif self.path == '/kml':
+            receiver.save_kml()
+            with open(KML_FILE, 'rb') as f:
+                self.send_response(200)
+                self.send_header('Content-type', 'application/vnd.google-earth.kml+xml')
+                self.send_header('Content-Disposition', f'attachment; filename={KML_FILE}')
+                self.end_headers()
+                self.wfile.write(f.read())
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+def start_http_server():
+    server = HTTPServer(('0.0.0.0', HTTP_PORT), RequestHandler)
+    print(f"HTTP server started on port {HTTP_PORT}")
+    webbrowser.open(f"http://localhost:{HTTP_PORT}")
+    server.serve_forever()
 
 def start_receiver():
-    oldlat = '~'
-    oldlon = '~'
-    total_bytes = 0
-    delay_avg = []  # Will only keep last 5 measurements
-
+    global receiver
+    receiver = GPSReceiver()
+    
+    # Start HTTP server in a separate thread
+    http_thread = threading.Thread(target=start_http_server, daemon=True)
+    http_thread.start()
+    
     with socket(AF_INET, SOCK_STREAM) as s:
         s.bind(('0.0.0.0', 40739))
         s.listen(1)
-        print("Receiver started. Waiting for connections...")
+        print("GPS receiver started. Waiting for connections...")
         conn, addr = s.accept()
+        receiver.client_addr = addr[0]
+        
         with conn:
             print(f"Connected to {addr}")
             buffer = bytearray()
             
             while True:
                 try:
-                    # Receive fixed-size chunks
                     chunk = conn.recv(MSG_SIZE - len(buffer))
                     if not chunk:
                         break
                         
-                    total_bytes += len(chunk)
+                    receiver.total_bytes += len(chunk)
                     buffer.extend(chunk)
                     
-                    # Process complete messages
                     while len(buffer) >= MSG_SIZE:
                         message = buffer[:MSG_SIZE]
                         buffer = buffer[MSG_SIZE:]
                         
-                        coords = unpack_data(message)
+                        coords = receiver.unpack_data(message)
                         if coords:
                             lat, lon, alt, ts = coords
-                            current_delay = calculate_latency(ts)
+                            current_delay = receiver.calculate_latency(ts)
                             
-                            # Maintain rolling window of 5 delays
-                            delay_avg.append(current_delay)
-                            if len(delay_avg) > DELAY_WINDOW:
-                                delay_avg.pop(0)
+                            # Update delay average
+                            receiver.delay_avg.append(current_delay)
+                            if len(receiver.delay_avg) > DELAY_WINDOW:
+                                receiver.delay_avg.pop(0)
+                            avg_delay = mean(receiver.delay_avg) if receiver.delay_avg else 0
                             
-                            avg_delay = mean(delay_avg) if delay_avg else 0
+                            # Store the data point
+                            with receiver.lock:
+                                data = GPSData(lat, lon, alt, ts)
+                                receiver.gps_path.append(data)
+                                if len(receiver.gps_path) % 100 == 0:
+                                    receiver.save_kml()
                             
-                            display(
-                                coords, lat, lon, 
-                                current_delay, avg_delay,
-                                oldlat, oldlon, addr, 
-                                total_bytes
-                            )
-                            oldlat = lat
-                            oldlon = lon
+                            # Update display
+                            receiver.display(data, current_delay, avg_delay)
+                            receiver.oldlat = lat
+                            receiver.oldlon = lon
                             
                 except (ConnectionResetError, ValueError) as e:
                     print(f"Connection error: {e}")
