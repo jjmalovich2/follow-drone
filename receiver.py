@@ -17,6 +17,14 @@ DELAY_WINDOW = 5
 HTTP_PORT = 8080
 KML_FILE = "gps_path.kml"
 
+# Valid coordinate ranges (adjust as needed)
+MIN_LAT = -90
+MAX_LAT = 90
+MIN_LON = -180
+MAX_LON = 180
+MIN_ALT = -1000  # Dead Sea is about -430m
+MAX_ALT = 10000  # Mount Everest is 8848m
+
 class GPSData:
     def __init__(self, lat, lon, alt, timestamp):
         self.lat = lat
@@ -29,14 +37,136 @@ class GPSReceiver:
         self.gps_path = []
         self.lock = threading.Lock()
         self.total_bytes = 0
+        self.valid_packets = 0
+        self.invalid_packets = 0
         self.delay_avg = []
-        self.oldlat = '~'
-        self.oldlon = '~'
         self.client_addr = None
         self.last_update = time.time()
         self.plot_img = None
+        self.buffer = bytearray()
 
-    # [Previous methods remain the same until generate_plot_image]
+    def validate_coordinates(self, lat, lon, alt):
+        """Validate GPS coordinates are within reasonable ranges"""
+        return (MIN_LAT <= lat <= MAX_LAT and
+                MIN_LON <= lon <= MAX_LON and
+                MIN_ALT <= alt <= MAX_ALT)
+
+    def validate_timestamp(self, timestamp):
+        """Validate timestamp is within reasonable range"""
+        current_time = time.time()
+        # Allow timestamps from 2020 to 1 hour in future
+        return 1577836800 <= timestamp <= current_time + 3600
+
+    def unpack_and_validate(self, binary_data):
+        """Unpack and validate GPS data with comprehensive checks"""
+        try:
+            if len(binary_data) != MSG_SIZE:
+                raise ValueError(f"Invalid size: expected {MSG_SIZE}, got {len(binary_data)}")
+            
+            # Unpack with strict byte order checking
+            lat, lon, alt, timestamp = struct.unpack(MSG_FORMAT, binary_data)
+            
+            # Validate numerical ranges
+            if not self.validate_coordinates(lat, lon, alt):
+                raise ValueError(f"Invalid coordinates: lat={lat}, lon={lon}, alt={alt}")
+            
+            if not self.validate_timestamp(timestamp):
+                raise ValueError(f"Invalid timestamp: {timestamp}")
+            
+            return GPSData(lat, lon, alt, timestamp)
+            
+        except struct.error as e:
+            raise ValueError(f"Unpack error: {e}")
+        except Exception as e:
+            raise ValueError(f"Validation error: {e}")
+
+    def process_buffer(self):
+        """Process all complete messages in the buffer"""
+        while len(self.buffer) >= MSG_SIZE:
+            message = self.buffer[:MSG_SIZE]
+            self.buffer = self.buffer[MSG_SIZE:]
+            
+            try:
+                data = self.unpack_and_validate(message)
+                self.valid_packets += 1
+                self.handle_valid_data(data)
+            except ValueError as e:
+                self.invalid_packets += 1
+                print(f"Bad data: {e}")
+                # Try to resync by looking for next valid message
+                self.resync_buffer()
+
+    def resync_buffer(self):
+        """Attempt to resync by finding the next valid message start"""
+        for i in range(1, len(self.buffer)):
+            try:
+                # Check if this could be a valid message
+                potential_msg = self.buffer[i:i+MSG_SIZE]
+                if len(potential_msg) < MSG_SIZE:
+                    break
+                    
+                data = self.unpack_and_validate(potential_msg)
+                # If we get here, we found a valid message
+                print(f"Resynced at offset {i}")
+                self.buffer = self.buffer[i:]
+                return
+            except ValueError:
+                continue
+        
+        # If we get here, no valid message found - clear buffer
+        self.buffer.clear()
+
+    def handle_valid_data(self, data):
+        """Process validated GPS data"""
+        current_delay = self.calculate_latency(data.timestamp)
+        
+        # Update delay metrics
+        self.delay_avg.append(current_delay)
+        if len(self.delay_avg) > DELAY_WINDOW:
+            self.delay_avg.pop(0)
+        avg_delay = mean(self.delay_avg) if self.delay_avg else 0
+        
+        # Store data
+        with self.lock:
+            self.gps_path.append(data)
+            self.last_update = time.time()
+            
+            # Update plot periodically
+            if len(self.gps_path) % 5 == 0:
+                self.generate_plot_image()
+        
+        # Update console display
+        self.display_status(data, current_delay, avg_delay)
+
+    def calculate_latency(self, sent_ts):
+        """Compute latency in milliseconds"""
+        return round((time.time() - sent_ts) * 1000, 2)
+
+    def display_status(self, data, current_delay, avg_delay):
+        """Display current status in console"""
+        os.system('cls' if os.name == 'nt' else 'clear')
+        print(f"""
+        GPS RECEIVER STATUS
+        -------------------------------------
+        | Connected To: {self.client_addr or 'None'}
+        | Valid Packets: {self.valid_packets}
+        | Invalid Packets: {self.invalid_packets}
+        | Buffer Size: {len(self.buffer)} bytes
+        -------------------------------------
+        | Current Position:
+        | Latitude: {data.lat:.6f}
+        | Longitude: {data.lon:.6f}
+        | Altitude: {data.alt:.1f}m
+        -------------------------------------
+        | Performance:
+        | Current Delay: {current_delay:.2f}ms
+        | Avg Delay (Last 5): {avg_delay:.2f}ms
+        -------------------------------------
+        | Web Interface: http://localhost:{HTTP_PORT}
+        | Path Points: {len(self.gps_path)}
+        | Last Update: {datetime.fromtimestamp(self.last_update).strftime('%H:%M:%S')}
+        -------------------------------------
+        """)
 
     def generate_plot_image(self):
         """Generate and cache the latest plot image"""
@@ -46,14 +176,21 @@ class GPSReceiver:
                 return
             
             plt.figure(figsize=(10, 6))
-            plt.plot([p.lon for p in self.gps_path], [p.lat for p in self.gps_path], 'b-')
+            plt.plot([p.lon for p in self.gps_path], [p.lat for p in self.gps_path], 'b-', linewidth=2)
+            
+            # Mark start and end points
+            if len(self.gps_path) > 1:
+                plt.plot(self.gps_path[0].lon, self.gps_path[0].lat, 'go', markersize=8, label='Start')
+                plt.plot(self.gps_path[-1].lon, self.gps_path[-1].lat, 'ro', markersize=8, label='End')
+            
             plt.xlabel('Longitude')
             plt.ylabel('Latitude')
-            plt.title('GPS Path')
+            plt.title(f'GPS Path ({len(self.gps_path)} points)')
+            plt.legend()
             plt.grid(True)
             
             buf = BytesIO()
-            plt.savefig(buf, format='png', bbox_inches='tight')
+            plt.savefig(buf, format='png', bbox_inches='tight', dpi=100)
             plt.close()
             buf.seek(0)
             self.plot_img = base64.b64encode(buf.read()).decode('utf-8')
